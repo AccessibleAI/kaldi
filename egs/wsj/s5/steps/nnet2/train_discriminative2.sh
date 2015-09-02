@@ -151,8 +151,6 @@ if [ $stage -le -1 ]; then
     nnet-am-switch-preconditioning  --num-samples-history=50000 - $dir/0.mdl || exit 1;
 fi
 
-
-
 if [ $num_threads -eq 1 ]; then
  train_suffix="-simple" # this enables us to use GPU code if
                         # we have just one thread.
@@ -160,7 +158,7 @@ else
   train_suffix="-parallel --num-threads=$num_threads"
 fi
 
-rm $dir/.error
+rm -f $dir/.error
 x=0   
 while [ $x -lt $num_iters ]; do
   if [ $stage -le $x ]; then
@@ -197,7 +195,12 @@ while [ $x -lt $num_iters ]; do
     fi
     rm $nnets_list
   fi
-  if $adjust_priors && [ ! -z "${iter_to_epoch[$x]}" ]; then
+  x=$[x+1]
+  
+  [ -f $dir/.error ] && exit 1
+  if [ $stage -le $[x-1] ] && $adjust_priors && [ ! -z "${iter_to_epoch[$x]}" ]; then
+    echo "Re-adjusting priors based on computed posteriors for iter $x"
+
     if [ ! -f $degs_dir/priors_egs.1.ark ]; then
       echo "$0: Expecting $degs_dir/priors_egs.1.ark to exist since --adjust-priors was true."
       echo "$0: Run this script with --adjust-priors false to not adjust priors"
@@ -205,7 +208,7 @@ while [ $x -lt $num_iters ]; do
     fi
     (
     e=${iter_to_epoch[$x]}
-    rm $dir/.error
+    rm -f $dir/.error
     num_archives_priors=`cat $degs_dir/info/num_archives_priors` || { touch $dir/.error; echo "Could not find $degs_dir/info/num_archives_priors. Set --adjust-priors false to not adjust priors"; exit 1; }
 
     $cmd JOB=1:$num_archives_priors $dir/log/get_post.epoch$e.JOB.log \
@@ -221,29 +224,37 @@ while [ $x -lt $num_iters ]; do
       vector-sum $dir/post.epoch$e.*.vec $dir/post.epoch$e.vec || \
       { touch $dir/.error; echo "Error in summing posteriors. See $dir/log/sum_post.epoch$e.log"; exit 1; }
 
-    rm $dir/post.epoch$e.*.vec
+    rm -f $dir/post.epoch$e.*.vec
 
-    echo "Re-adjusting priors based on computed posteriors for iter $x"
     $cmd $dir/log/adjust_priors.epoch$e.log \
-      nnet-adjust-priors $dir/$x.mdl $dir/post.epoch$e.vec $dir/$x.mdl \
+      nnet-adjust-priors $dir/$x.mdl $dir/post.epoch$e.vec $dir/$x.adj.mdl \
       || { touch $dir/.error; echo "Error in adjusting priors. See $dir/log/adjust_priors.epoch$e.log"; exit 1; }
     ) &
   fi
-
   [ -f $dir/.error ] && exit 1
-
-  x=$[$x+1]
 done
 
+wait
+[ -f $dir/.error ] && exit 1
+
 rm $dir/final.mdl 2>/dev/null
-ln -s $x.mdl $dir/final.mdl
+
+if $adjust_priors; then
+  ln -s $x.adj.mdl $dir/final.mdl
+else 
+  ln -s $x.mdl $dir/final.mdl
+fi
 
 echo Done
 
 epoch_final_iters=
 for e in $(seq 0 $num_epochs); do
   x=$[($e*$num_archives)/$num_jobs_nnet] # gives the iteration number.
-  ln -sf $x.mdl $dir/epoch$e.mdl
+  if $adjust_priors; then
+    ln -sf $x.adj.mdl $dir/epoch$e.mdl
+  else
+    ln -sf $x.mdl $dir/epoch$e.mdl
+  fi
   epoch_final_iters="$epoch_final_iters $x"
 done
 
